@@ -152,6 +152,76 @@ class SmokeContractTests(unittest.TestCase):
                 with self.assertRaises(subprocess.CalledProcessError):
                     smoke.cpu_smoke()
 
+    def test_cli_help_runs_installed_script_and_restores_metadata(self):
+        platform = SimpleNamespace(device_type="", is_unspecified=lambda: True)
+        original_argv = sys.argv
+        console_script = "/opt/venv/bin/vllm"
+
+        def import_platform(name):
+            self.assertEqual(name, "vllm.platforms")
+            self.assertEqual(sys.argv, [console_script, "serve", "--help"])
+            return SimpleNamespace(current_platform=platform)
+
+        def run_script(path, *, run_name):
+            self.assertEqual(path, console_script)
+            self.assertEqual(run_name, "__main__")
+            self.assertEqual(platform.device_type, "cpu")
+            raise SystemExit(exit_code)
+
+        for exit_code in (0, 2):
+            with (
+                self.subTest(exit_code=exit_code),
+                patch.object(smoke.shutil, "which", return_value=console_script),
+                patch.object(
+                    smoke.importlib, "import_module", side_effect=import_platform
+                ),
+                patch.object(smoke.runpy, "run_path", side_effect=run_script),
+                patch.object(sys, "stdout", new_callable=io.StringIO),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                smoke.cli_help_smoke()
+            self.assertEqual(raised.exception.code, exit_code)
+            self.assertEqual(platform.device_type, "")
+            self.assertIs(sys.argv, original_argv)
+
+    def test_cli_help_rejects_missing_script_or_detected_device(self):
+        with (
+            patch.object(smoke.shutil, "which", return_value=None),
+            self.assertRaisesRegex(RuntimeError, "console script missing"),
+        ):
+            smoke.cli_help_smoke()
+        with (
+            patch.object(smoke.shutil, "which", return_value="/opt/venv/bin/vllm"),
+            patch.object(
+                smoke.importlib,
+                "import_module",
+                return_value=SimpleNamespace(
+                    current_platform=SimpleNamespace(is_unspecified=lambda: False)
+                ),
+            ),
+            patch.object(smoke.runpy, "run_path") as run,
+            self.assertRaisesRegex(RuntimeError, "GPU-less"),
+        ):
+            smoke.cli_help_smoke()
+        run.assert_not_called()
+
+    def test_cli_help_mode_is_separate_from_metadata_and_gpu_smoke(self):
+        with (
+            patch.object(smoke, "cli_help_smoke") as help_smoke,
+            patch.object(smoke, "cpu_smoke") as cpu,
+            patch.object(smoke, "gpu_smoke") as gpu,
+        ):
+            self.assertEqual(smoke.main(["--cli-help"]), 0)
+            help_smoke.assert_called_once()
+            cpu.assert_not_called()
+            gpu.assert_not_called()
+            with (
+                patch.object(sys, "stderr", new_callable=io.StringIO),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                smoke.main(["--gpu", "--cli-help"])
+            self.assertEqual(raised.exception.code, 2)
+
     def test_gpu_is_explicit_and_errors_are_not_skipped(self):
         with (
             patch.object(smoke, "cpu_smoke", return_value=(self.torch, Path("legacy"))),

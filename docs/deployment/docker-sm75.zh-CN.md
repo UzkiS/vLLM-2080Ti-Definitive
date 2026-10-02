@@ -2,10 +2,13 @@
 
 语言：[English](docker-sm75.md) | 简体中文
 
-**状态：UNVALIDATED（容器路线尚未验证）。** 源码构建或 CPU 检查通过不等于 GPU
-验证通过。推广此路线之前，必须记录容器冷构建、GPU、模型/API、缓存复用以及 GHCR
-拉取的实际结果。已有原生主机 benchmark 不能作为此镜像的验证。一张 22 GiB RTX
-2080 Ti 的本地测试也不能证明双卡、NVLink、容量或吞吐表现。
+**状态：GPU 服务尚未验证。** 首次
+[fork CI](https://github.com/UzkiS/vLLM-2080Ti-Definitive/actions/runs/36977311241)
+从提交 `039e6aa1ca` 构建并加载镜像，耗时约 35 分钟，依赖、元数据、Torch 补丁
+及 FlashQLA 源码检查通过。但随后直接运行 CLI help 时因 runner 没有 GPU 而失败，
+这不是一次完整通过的 CI。GPU、模型/API、缓存复用及 GHCR 拉取结果仍待验证。
+已有原生主机 benchmark 不能作为此镜像的验证；单卡 smoke 也不能证明双卡、
+NVLink、容量或吞吐表现。
 
 ## 范围与来源
 
@@ -84,17 +87,30 @@ source/revision 标签；可复现部署优先使用镜像 digest。
 
 ## CPU 与 GPU smoke（不下载模型）
 
-CPU 工具刻意不初始化 CUDA、不加载 vLLM 原生内核；没有 `libcuda` 时也不声称已
-执行原生扩展。它检查已安装 wheel 元数据、精确的 Torch/CUDA 和 vLLM 版本、
-`import vllm`、E8M0 补丁、FlashQLA 源码/补丁符号、路径和 JIT 编译工具可用性。
-依赖一致性和真实 `vllm serve --help` 入口另外检查：
+元数据检查工具刻意不初始化 CUDA、不加载 vLLM 原生内核。它检查已安装 wheel
+元数据、精确的 Torch/CUDA 和 vLLM 版本、`import vllm`、E8M0 补丁、FlashQLA
+源码/补丁符号、路径及 JIT 编译工具可用性。依赖一致性另外检查：
 
 ```bash
 docker run --rm --entrypoint python "$IMAGE" \
   /opt/vllm-tools/smoke_docker_sm75.py
 docker run --rm --entrypoint uv "$IMAGE" pip check --python /opt/venv/bin/python
-docker run --rm "$IMAGE" --help
 ```
+
+没有 GPU 的 runner 直接执行 `vllm serve --help` 时，会在构造设备配置默认值时
+失败。独立的 CLI 测试在隔离进程中临时提供缺失的设备元数据，再执行已安装的
+console script；它不选择 CPU 内核、不修改镜像环境，也不捕获 CLI 失败。
+CI 另行检查真实入口：
+
+```bash
+docker image inspect --format '{{json .Config.Entrypoint}}' "$IMAGE"
+docker run --rm --entrypoint python "$IMAGE" \
+  /opt/vllm-tools/smoke_docker_sm75.py --cli-help
+```
+
+预期入口为 `["vllm","serve"]`。模拟设备元数据的 help 检查仅验证 CLI 导入与参数
+构造，**不代表未经修改的 GPU 启动或原生内核执行通过**。在合适的 GPU 主机上，
+还应执行 `docker run --rm --gpus all "$IMAGE" --help`，并完成下文的实际服务测试。
 
 只有显式传入 `--gpu` 才执行真实内核。GPU 不可用、不是 SM75 或检查失败时直接
 报错，不会把失败转成 skip。工具仅测试 device 0：

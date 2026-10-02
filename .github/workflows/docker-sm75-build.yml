@@ -135,8 +135,12 @@ jobs:
         run: |
           set -euo pipefail
           trap 'status=$?; printf "CPU smoke elapsed: %s seconds (exit %s)\n\n" "$SECONDS" "$status" >> "$GITHUB_STEP_SUMMARY"' EXIT
+          entrypoint=$(docker image inspect --format '{{json .Config.Entrypoint}}' "$IMAGE_ID")
+          [[ "$entrypoint" == '["vllm","serve"]' ]]
           docker run --rm --entrypoint python "$IMAGE_ID" /opt/vllm-tools/smoke_docker_sm75.py
-          docker run --rm "$IMAGE_ID" --help
+          # Installed CLI imports/argument parsing only; a GPU-less runner needs
+          # emulated device metadata for help defaults, not a CPU runtime image.
+          docker run --rm --entrypoint python "$IMAGE_ID" /opt/vllm-tools/smoke_docker_sm75.py --cli-help
 
       - name: Log in to GHCR only after successful smoke
         if: ${{ inputs.publish && steps.metadata.outputs.publish == 'true' }}

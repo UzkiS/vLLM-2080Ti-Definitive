@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""SM75 image checks; only --gpu initializes CUDA or compiles JIT extensions."""
+"""SM75 image checks: metadata, GPU-less CLI help, and opt-in GPU kernels."""
 
 from __future__ import annotations
 
@@ -9,11 +9,13 @@ import importlib
 import importlib.metadata
 import importlib.util
 import os
+import runpy
 import shlex
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import tomllib
 
@@ -211,14 +213,44 @@ def gpu_smoke(torch, source: Path) -> None:
     )
 
 
+def cli_help_smoke() -> None:
+    """Exercise the installed CLI, emulating only GPU-less help defaults."""
+    console_script = shutil.which("vllm")
+    require(console_script is not None, "Installed vllm console script missing")
+    # CLI imports inspect argv, so set it before importing the platform module.
+    with patch.object(sys, "argv", [console_script, "serve", "--help"]):
+        platforms = importlib.import_module("vllm.platforms")
+        platform = platforms.current_platform
+        require(platform.is_unspecified(), "CLI smoke expects a GPU-less CUDA image")
+        print(
+            "Installed CLI help check with emulated device metadata only; "
+            "this is NOT GPU startup validation.",
+            flush=True,
+        )
+        # DeviceConfig's default factory requires a device while constructing
+        # help. Keep UnspecifiedPlatform; do not select CPU kernels or change
+        # the image environment. The same override is used in config tests.
+        with patch.object(platform, "device_type", "cpu"):
+            runpy.run_path(console_script, run_name="__main__")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--gpu",
         action="store_true",
         help="also execute CUDA/FlashInfer/FlashQLA on SM75 device 0",
     )
+    mode.add_argument(
+        "--cli-help",
+        action="store_true",
+        help="only run installed CLI help with emulated GPU-less device metadata",
+    )
     args = parser.parse_args(argv)
+    if args.cli_help:
+        cli_help_smoke()
+        return 0
     torch, source = cpu_smoke()
     if args.gpu:
         with torch.inference_mode():

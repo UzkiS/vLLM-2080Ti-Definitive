@@ -2,11 +2,15 @@
 
 Language: English | [简体中文](docker-sm75.zh-CN.md)
 
-**Status: UNVALIDATED container route.** A successful source build or CPU check
-is not GPU validation. Container cold-build, GPU, model/API, cache-reuse, and
-GHCR pull results must be recorded before promoting this route. Existing native
-host benchmarks do not validate this image. A local test on one 22 GiB RTX 2080
-Ti would not establish dual-GPU, NVLink, capacity, or throughput claims.
+**Status: GPU serving NOT VALIDATED.** The first
+[fork CI run](https://github.com/UzkiS/vLLM-2080Ti-Definitive/actions/runs/36977311241)
+built and loaded the image from commit `039e6aa1ca` in about 35 minutes, and
+passed dependency, metadata, Torch-patch, and FlashQLA-source checks. That run
+failed at the subsequent bare CLI help check because the runner had no GPU;
+it was not a fully passing CI run. GPU, model/API, cache-reuse, and GHCR pull
+results remain pending. Existing native host benchmarks do not validate this
+image; a single-GPU smoke would not establish dual-GPU, NVLink, capacity, or
+throughput claims.
 
 ## Scope and provenance
 
@@ -94,18 +98,33 @@ run on a personal GPU runner. These workflows do not create releases or Git tags
 
 ## CPU and GPU smoke (no model download)
 
-The CPU tool intentionally does not initialize CUDA, load native vLLM kernels, or claim
-native extension execution when `libcuda` is absent. It checks installed wheel
-metadata, exact Torch/CUDA and vLLM versions, `import vllm`, the E8M0 patch,
-FlashQLA source/patch symbols, paths, and JIT compiler availability. Dependency
-consistency and the actual `vllm serve --help` entrypoint are separate checks:
+The metadata tool intentionally does not initialize CUDA or load native vLLM
+kernels. It checks installed wheel metadata, exact Torch/CUDA and vLLM versions,
+`import vllm`, the E8M0 patch, FlashQLA source/patch symbols, paths, and JIT compiler
+availability. Check dependency consistency separately:
 
 ```bash
 docker run --rm --entrypoint python "$IMAGE" \
   /opt/vllm-tools/smoke_docker_sm75.py
 docker run --rm --entrypoint uv "$IMAGE" pip check --python /opt/venv/bin/python
-docker run --rm "$IMAGE" --help
 ```
+
+On a GPU-less runner, bare `vllm serve --help` fails while constructing device
+configuration defaults. The separate CLI test temporarily supplies only the
+missing device metadata in an isolated process and executes the installed
+console script; it does not select CPU kernels, change the image environment,
+or catch CLI failures. CI also inspects the real entrypoint independently:
+
+```bash
+docker image inspect --format '{{json .Config.Entrypoint}}' "$IMAGE"
+docker run --rm --entrypoint python "$IMAGE" \
+  /opt/vllm-tools/smoke_docker_sm75.py --cli-help
+```
+
+The expected entrypoint is `["vllm","serve"]`. This emulated help check validates
+CLI imports and argument construction, **not unmodified GPU startup or native
+kernel execution**. On a suitable GPU host, check the unmodified entrypoint with
+`docker run --rm --gpus all "$IMAGE" --help` as well as actual serving below.
 
 Only an explicit `--gpu` runs real kernels. It fails on unavailable/non-SM75 GPUs
 or failed checks; it does not turn failures into skips. It tests device 0 only:
