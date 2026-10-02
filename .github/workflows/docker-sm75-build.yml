@@ -1,0 +1,171 @@
+name: SM75 Docker build and smoke
+
+on:
+  workflow_call:
+    inputs:
+      publish:
+        description: Must match the caller event's publication policy
+        type: boolean
+        required: true
+
+# Inherit the caller's permissions without requesting or elevating them here.
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Keep the local image, not a second image archive or build-record artifact.
+      DOCKER_BUILD_RECORD_UPLOAD: 'false'
+    steps:
+      - name: Check hosted runner resources and reclaim unused SDKs
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_ARCH" == X64 ]]
+          printf 'CI_STARTED=%s\n' "$(date +%s)" >> "$GITHUB_ENV"
+          df -h /
+          free -h
+          # Only known disposable SDKs on this ephemeral hosted runner. Log each
+          # existing target before removal; do not prune arbitrary user/cache paths.
+          for sdk in /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL; do
+            if [[ -d "$sdk" ]]; then
+              sudo du -sh -- "$sdk"
+              sudo rm -rf -- "$sdk"
+            fi
+          done
+          df -h /
+          available=$(df --output=avail -B1 / | tr -d '[:alpha:][:space:]')
+          # A sanity floor, not evidence that a CUDA cold build fits this runner.
+          if (( available < 25 * 1024 * 1024 * 1024 )); then
+            printf 'Less than 25 GiB free after SDK cleanup; refusing the cold build.\n' >&2
+            exit 1
+          fi
+          printf '### SM75 Docker (linux/amd64)\n\n' >> "$GITHUB_STEP_SUMMARY"
+          printf 'Free disk before build: %s bytes\n\n' "$available" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Hosted CPU packaging smoke only; GPU kernels and serving are not validated here.\n\n' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check out source without retained credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Check source and test metadata and smoke contracts
+        run: |
+          bash -n build.sh launcher.sh tools/validate_profiles.sh docker/build-sm75.sh
+          bash tools/validate_profiles.sh
+          python3 -m unittest discover -s tests/tools -p 'test_*docker_sm75*.py' -v
+          python3 -m py_compile tools/docker_sm75_metadata.py tools/smoke_docker_sm75.py
+          git diff --check
+
+      - name: Resolve image metadata and verify publication policy
+        id: metadata
+        env:
+          REQUEST_PUBLISH: ${{ inputs.publish }}
+        run: python3 tools/docker_sm75_metadata.py
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          # No binary cache writes from PR jobs either.
+          cache-binary: false
+
+      - name: Start build timer
+        id: build-clock
+        run: printf 'BUILD_STARTED=%s\n' "$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Build once and load the image
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/Dockerfile.sm75
+          target: vllm-openai
+          platforms: linux/amd64
+          load: true
+          push: false
+          # Single-platform Docker load does not preserve registry attestations.
+          provenance: false
+          sbom: false
+          # Local context, no Git authentication token or secrets in the build.
+          github-token: ''
+          build-args: |
+            MAX_JOBS=2
+            NVCC_THREADS=1
+            VLLM_BUILD_COMMIT=${{ github.sha }}
+            VLLM_IMAGE_TAG=${{ steps.metadata.outputs.version }}
+            VLLM_BUILD_URL=https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            VLLM_IMAGE_SOURCE=https://github.com/${{ github.repository }}
+          tags: ${{ steps.metadata.outputs.local_image }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.metadata.outputs.version }}
+          # GHA layer cache only: this does not persist RUN cache mounts (ccache,
+          # pip, etc.). Only default-branch pushes may write this shared scope;
+          # PRs/releases/manual tests are read-only. GitHub also isolates PR caches.
+          cache-from: type=gha,scope=sm75-linux-amd64-cu130-py312-v1
+          cache-to: >-
+            ${{ github.event_name == 'push' &&
+                github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+                'type=gha,scope=sm75-linux-amd64-cu130-py312-v1,mode=min,ignore-error=true' || '' }}
+
+      - name: Record build duration and loaded image identity
+        id: loaded
+        if: ${{ always() && steps.build-clock.outcome == 'success' }}
+        env:
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          LOCAL_IMAGE: ${{ steps.metadata.outputs.local_image }}
+        run: |
+          set -euo pipefail
+          printf 'Build/load elapsed: %s seconds\n\n' "$(( $(date +%s) - BUILD_STARTED ))" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$BUILD_OUTCOME" == success ]]; then
+            image_id=$(docker image inspect --format '{{.Id}}' "$LOCAL_IMAGE")
+            size=$(docker image inspect --format '{{.Size}}' "$image_id")
+            printf 'image_id=%s\n' "$image_id" >> "$GITHUB_OUTPUT"
+            printf 'Local image: `%s` (%s bytes, uncompressed)\n\n' "$image_id" "$size" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          df -h /
+          free -h
+
+      - name: Smoke the loaded image without a GPU
+        env:
+          IMAGE_ID: ${{ steps.loaded.outputs.image_id }}
+        run: |
+          set -euo pipefail
+          trap 'status=$?; printf "CPU smoke elapsed: %s seconds (exit %s)\n\n" "$SECONDS" "$status" >> "$GITHUB_STEP_SUMMARY"' EXIT
+          docker run --rm --entrypoint python "$IMAGE_ID" /opt/vllm-tools/smoke_docker_sm75.py
+          docker run --rm "$IMAGE_ID" --help
+
+      - name: Log in to GHCR only after successful smoke
+        if: ${{ inputs.publish && steps.metadata.outputs.publish == 'true' }}
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag and push the exact image that passed smoke
+        if: ${{ inputs.publish && steps.metadata.outputs.publish == 'true' }}
+        env:
+          IMAGE_ID: ${{ steps.loaded.outputs.image_id }}
+          IMAGE_TAGS: ${{ steps.metadata.outputs.tags }}
+        run: |
+          set -euo pipefail
+          trap 'status=$?; printf "Publish elapsed: %s seconds (exit %s)\n\n" "$SECONDS" "$status" >> "$GITHUB_STEP_SUMMARY"' EXIT
+          read -r -a tags <<< "$IMAGE_TAGS"
+          (( ${#tags[@]} > 0 ))
+          for tag in "${tags[@]}"; do
+            docker tag "$IMAGE_ID" "$tag"
+            docker push "$tag"
+            printf 'Published `%s`\n\n' "$tag" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Record total duration and final disk availability
+        if: ${{ always() }}
+        run: |
+          if [[ -n "${CI_STARTED:-}" ]]; then
+            printf 'Total elapsed: %s seconds\n\n' "$(( $(date +%s) - CI_STARTED ))" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          df -h /

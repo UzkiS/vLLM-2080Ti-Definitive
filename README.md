@@ -127,6 +127,21 @@ NON_INTERACTIVE=1 ./launcher.sh
 Use `./launcher.sh --print-config` to preview a route. See the
 [non-interactive launch guide](docs/non-interactive-launch.md) for automation.
 
+### Docker (SM75, unvalidated container route)
+
+The separate `docker/Dockerfile.sm75` targets Linux amd64 / SM75 with CUDA
+13.0.3, Ubuntu 24.04, and Python 3.12. It builds this fork's wheel and keeps the
+patched FlashQLA source/toolchain for first-use JIT; it is not the native host
+validation environment or a claim that a GHCR image has already been published.
+The existing upstream-derived `docker/Dockerfile` remains available.
+
+The image accepts the official-style `vllm serve` model arguments directly; it
+does not run `launcher.sh` or automatically apply profiles. See the bilingual
+[SM75 Docker guide](docs/deployment/docker-sm75.md) for local builds, owner-scoped
+GHCR/tag rules, cache mounts, CPU checks, opt-in GPU smoke, and a local-only real
+model/API smoke. **Container validation is pending**; native benchmark numbers
+do not establish container throughput, capacity, or dual-GPU support.
+
 ## 🧭 Profiles
 
 Read the [Profile Guide](profiles/README.md) for the layout and route fields.

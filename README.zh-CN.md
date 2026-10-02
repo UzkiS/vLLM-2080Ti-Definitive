@@ -118,6 +118,19 @@ NON_INTERACTIVE=1 ./launcher.sh
 使用 `./launcher.sh --print-config` 预览路线。自动化部署见
 [非交互启动说明](docs/non-interactive-launch.zh-CN.md)。
 
+### Docker（SM75，容器路线尚未验证）
+
+独立的 `docker/Dockerfile.sm75` 面向 Linux amd64 / SM75，使用 CUDA 13.0.3、
+Ubuntu 24.04 和 Python 3.12。它构建本 fork 的 wheel，并保留补丁后的 FlashQLA
+源码/工具链供首次使用时 JIT；这不是原生主机验证环境，也不表示 GHCR 已发布镜像。
+已有沿用上游的 `docker/Dockerfile` 保持可用。
+
+镜像直接接收与官方 `vllm serve` 一致的模型参数，不运行 `launcher.sh` 或自动应用
+Profile。本地构建、按仓库所有者区分的 GHCR/标签规则、缓存挂载、CPU 检查、显式
+启用的 GPU smoke 及仅供本机访问的真实模型/API smoke，见双语
+[SM75 Docker 指南](docs/deployment/docker-sm75.zh-CN.md)。**容器验证尚待完成**；
+原生 benchmark 数字不能证明容器的吞吐、容量或双卡支持。
+
 ## 🧭 Profile 与推荐路线
 
 目录结构和路线字段请参阅 [Profile 指南](profiles/README.zh-CN.md)；详细 Profile
