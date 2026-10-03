@@ -1,54 +1,195 @@
-# SM75 Docker 路线
+# SM75 Docker 镜像
 
 语言：[English](docker-sm75.md) | 简体中文
 
-**状态：GPU 服务尚未验证。** 首次
-[fork CI](https://github.com/UzkiS/vLLM-2080Ti-Definitive/actions/runs/36977311241)
-从提交 `039e6aa1ca` 构建并加载镜像，耗时约 35 分钟，依赖、元数据、Torch 补丁
-及 FlashQLA 源码检查通过。但随后直接运行 CLI help 时因 runner 没有 GPU 而失败，
-这不是一次完整通过的 CI。GPU、模型/API、缓存复用及 GHCR 拉取结果仍待验证。
-已有原生主机 benchmark 不能作为此镜像的验证；单卡 smoke 也不能证明双卡、
-NVLink、容量或吞吐表现。
+面向 **RTX 2080 Ti（SM75）** 的 vLLM 2080 Ti Definitive Edition 容器镜像，
+拉取即可运行。用法与官方 vLLM 镜像一致：入口是 `vllm serve`，模型和参数直接写在
+镜像名后面即可。
 
-## 范围与来源
+## 状态
 
-仓库已有沿用上游的 `docker/Dockerfile` 及相关 Docker 工具。独立的
-`docker/Dockerfile.sm75` 接入本 fork 的 Torch 和 FlashQLA 补丁，以及仅面向 SM75
-的构建/发布工作流；原有 Dockerfile 本身不代表已有经过验证的 2080 Ti 镜像或仓库
-GitHub Actions 发布流水线。原生 `build.sh`、`launcher.sh` 和已发布的 Profile
-保持不变。
+已在**两张 RTX 2080 Ti（2× 22 GiB，tensor parallel 2）**上验证：
 
-本路线仅面向 **Linux amd64 / SM75**，容器使用 CUDA 13.0.3 devel、Ubuntu 24.04
-和 `/opt/venv` 中的 Python 3.12，与项目原生 Ubuntu 26.04+/kernel 7+/GCC 15
-目标环境不同。宿主机仍需要兼容的 NVIDIA 驱动、Docker Linux 引擎及 NVIDIA
-Container Toolkit/GPU 透传；容器不能替代宿主机驱动。此路线不推广 ARM/QEMU
-或其他 GPU 架构。
+- 27B 生产形态模型同时服务文本与多模态请求，CUDA Graph 正常捕获，KV 池
+  7.75 GiB，每卡占用约 18.8 GiB，全程 **0 条 NVRM 报错**；冷加载约 13 分钟。
+- 小文本模型（`Qwen/Qwen3-0.6B`，FP16）也能正常启动并正确作答。
 
-镜像从本 fork 源码构建非 editable wheel，不使用上游预编译 vLLM 内核 wheel。
-Torch/CUDA 策略取自 `PROJECT_RELEASE.env` 和构建依赖；因 `.git` 不进入构建
-上下文，包版本使用 `pyproject.toml` 的 fallback。`/opt/vllm-tools/` 保留发布
-元数据、`pyproject.toml` 及 Torch E8M0 检查器，供核验使用。
+本硬件上**尚未测量**：吞吐、TTFT/TPOT、长上下文下的 KV 容量、重启后的缓存复用。
+容量与吞吐取决于模型、KV 精度、上下文长度与拓扑，来自其他配置的数字不能直接沿用。
+NVLink 拓扑以及其他模型、精度、后端同样未验证。
 
-FlashQLA 使用固定的
-[`weicj/FlashQLA-SM70-SM75` 源码](https://github.com/weicj/FlashQLA-SM70-SM75/tree/3ab27d77d8ca01d7a4718903b726add1a8886c0e)
-并应用本仓库 SM75 补丁，放在 `/opt/FlashQLA`，通过 Python import 路径及
-`FLASHQLA_ROOT` / `FLASHQLA_DIR` 暴露。这是源码集成，不是另行安装带有旧依赖
-固定版本的 FlashQLA distribution。镜像保留 CUDA devel 工具、C++ 编译器、Ninja、
-头文件和补丁后源码：**FlashQLA 编译延后到首次 GPU 使用时进行**，不能称为镜像内
-已 AOT 编译或构建阶段已完成 GPU 验证。FlashInfer 所选内核也可能需要 JIT。
-Smoke 使用 FlashInfer 的 CUDA-core decode 路径，不强制要求 SM75 通常不支持的
-FlashAttention 2（FA2）后端。
+宿主机必须能够分配锁页内存，见[宿主机要求](#宿主机要求)。
 
-再分发镜像或派生版本时，保留 [上游 vLLM](https://github.com/vllm-project/vllm)
+CI 在**无 GPU** 的机器上构建镜像（约 **26 分钟**），推送后再按 digest 拉回并测试
+这些字节。因此 CI 变绿说明发布产物完整，**不代表 GPU 推理已经验证过**。
+
+## 宿主机要求
+
+只有可用的 NVIDIA 驱动和 GPU 透传还不够：宿主机必须能分配**锁页内存**。否则任何模型
+都起不来，表现为
+
+    torch.AcceleratorError: CUDA error: OS call failed or operation not supported on this OS
+
+而内核日志会给出真正的原因：
+
+    NVRM: Failed to create a DMA mapping!
+    NVRM: osIovaMap: failed to map allocation (status = 0x59)
+
+这两行来自 `nv_dma_map_alloc` 把内存页交给内核 DMA API 的过程，因此故障在宿主机的
+IOMMU/DMA 层——与本镜像、启动参数、模型都无关。官方 vLLM 镜像在这类宿主机上同样
+失败。可以在**不经 Docker、不经 vLLM** 的情况下直接验证：
+
+```bash
+python3 -c "
+import ctypes
+cu = ctypes.CDLL('libcuda.so.1'); cu.cuInit(0)
+for mb in (64, 128, 256):
+    d = ctypes.c_void_p(); cu.cuMemAllocHost(ctypes.byref(d), mb*1024*1024)
+    print(mb, 'MB:', 'OK' if d else 'FAIL')
+"
+```
+
+若较大尺寸失败，可在 `/etc/default/grub` 的 `GRUB_CMDLINE_LINUX_DEFAULT` 中加入
+`iommu.passthrough=1`，然后 `sudo update-grub && sudo reboot`。重测前先确认参数生效
+——日志必须显示 `Passthrough`：
+
+```bash
+journalctl -k -b | grep 'Default domain type'
+```
+
+注意：`intel_iommu=pt` 在当前内核上**不是合法参数**，传入只会打印 "Unknown option"
+并静默失效；真正生效的是 `iommu.passthrough=1`。这是宿主机侧的改动：若宿主机的 IOMMU
+翻译域无法映射这类分配，换任何 vLLM 镜像都会同样失败。
+
+## 快速开始
+
+拉取已发布的镜像。`weicj/vLLM-2080Ti-Definitive` 发布到
+`ghcr.io/weicj/vllm-2080ti-definitive`；fork 则在各自的 owner 下发布：
+
+```bash
+export IMAGE="ghcr.io/weicj/vllm-2080ti-definitive:main"
+docker pull "$IMAGE"
+```
+
+### Docker Compose（推荐）
+
+```bash
+mkdir vllm-sm75 && cd vllm-sm75
+curl -fsSL -o compose.yaml https://raw.githubusercontent.com/weicj/vLLM-2080Ti-Definitive/main/docker/docker-compose.sm75.yml
+```
+
+该文件也在仓库内：
+[`docker/docker-compose.sm75.yml`](../../docker/docker-compose.sm75.yml)。
+
+启动前先配置。`MODELS_DIR` 是宿主机存放模型的目录，`MODEL_NAME` 是它下面的模型
+目录名。两者都必填——缺失时 compose 会直接报错，避免你还没选好模型就已经跑起来。
+
+```bash
+cat > .env <<'EOF'
+MODELS_DIR=/path/to/models
+MODEL_NAME=Qwen3-0.6B
+EOF
+docker compose up -d
+```
+
+可选变量：`IMAGE`、`MODEL_ALIAS`、`TP_SIZE`、`MAX_MODEL_LEN`、
+`GPU_MEMORY_UTILIZATION`、`MAX_NUM_SEQS`。其他 vLLM 参数——`--api-key`、
+`--kv-cache-dtype`、`--enable-prefix-caching` 等——自己加到 compose 文件的
+`command:` 里即可，镜像入口已经是 `vllm serve`。首次启动需要加载权重、并可能触发
+内核编译，请留出时间：
+
+```bash
+docker compose ps
+docker compose logs -f
+```
+
+### Docker
+
+```bash
+docker run --rm --name vllm-sm75 --gpus all --ipc=host \
+  -p 127.0.0.1:8000:8000 \
+  -v /path/to/models:/models:ro \
+  "$IMAGE" /models/Qwen3-0.6B \
+  --dtype half --max-model-len 2048
+```
+
+直接传模型和参数即可，**不要再写 `vllm serve`**，入口已包含。
+
+在另一个终端确认服务正常：
+
+```bash
+curl --fail http://127.0.0.1:8000/health
+curl --fail http://127.0.0.1:8000/v1/models
+```
+
+`--ipc=host` 是官方镜像文档的用法，多卡 tensor parallel 也需要它（或足够大的
+`--shm-size`）。
+
+**WSL2 宿主机**下 vLLM 默认关闭 pinned memory，启动会以
+`RuntimeError: UVA is not available` 中止，需加上
+`-e VLLM_WSL2_ENABLE_PIN_MEMORY=1`；原生 Linux 不需要。
+
+`docker run` 示例发布到 `127.0.0.1`，而 compose 文件绑定 `0.0.0.0`。除非自行配置，
+服务本身没有认证，因此在向本机之外暴露之前请先加上 `--api-key`。
+
+## 双卡
+
+命令不变，把 `--tensor-parallel-size` 设为 2：
+
+```bash
+docker run --rm --name vllm-sm75-2gpu --gpus all --ipc=host \
+  -p 127.0.0.1:8000:8000 \
+  -v /path/to/models:/models:ro \
+  "$IMAGE" /models/Qwen3-0.6B \
+  --dtype half --tensor-parallel-size 2 --max-model-len 32768 \
+  --gpu-memory-utilization 0.9
+```
+
+确认两张卡都在工作，并执行与上文相同的 `/health`、`/v1/models` 和生成检查：
+
+```bash
+nvidia-smi --query-gpu=index,memory.used --format=csv,noheader
+```
+
+使用 Compose 时，改为把 `--tensor-parallel-size 2` 加到 compose 文件的 `command:` 里。
+
+先用小模型打通链路，再换成真正需要双卡的模型。请在确切主机上记录：两卡之间是
+NVLink 桥还是仅走 PCIe、冷启动耗时、首次 JIT 编译耗时、使用相同缓存卷的第二次
+启动耗时、每卡显存占用，以及 `--tensor-parallel-size 2` 下输出是否仍然正确。
+双卡服务现已验证通过（见"状态"），但上述数字是逐机器记录的，仍不能说明其他模型、
+精度或上下文的容量与吞吐。
+
+## 镜像内容
+
+- **仅 Linux amd64**，CUDA 13.0.3 devel、Ubuntu 24.04、`/opt/venv` 中的
+  Python 3.12。这比项目原生主机目标（Ubuntu 26.04+、kernel 7+、GCC 15）更新，
+  是一条独立且范围仍然较窄的路线。
+- **从本仓库源码构建**的 wheel，而非上游预编译 vLLM wheel，并应用了本 fork 的
+  Torch E8M0 补丁。
+- FlashQLA 采用固定的
+  [`weicj/FlashQLA-SM70-SM75` 源码](https://github.com/weicj/FlashQLA-SM70-SM75/tree/3ab27d77d8ca01d7a4718903b726add1a8886c0e)
+  加本仓库 SM75 补丁，位于 `/opt/FlashQLA`，通过 `PYTHONPATH` 及
+  `FLASHQLA_ROOT` / `FLASHQLA_DIR` 暴露。这是源码集成，不是另行安装带旧依赖固定
+  版本的 FlashQLA distribution。
+- 镜像保留 CUDA 工具链、C++ 编译器、Ninja 和头文件，因为 FlashQLA 与 FlashInfer
+  会在**首次使用 GPU 时**编译内核。镜像内没有 AOT 预编译，构建阶段也不执行任何
+  GPU 代码。
+- `/opt/vllm-tools/` 存放发布元数据、`pyproject.toml` 和 Torch E8M0 检查器，便于
+  核验。
+
+宿主机仍需要可用的 NVIDIA 驱动和 GPU 透传（NVIDIA Container Toolkit）；容器不能
+替代驱动。本路线不支持 ARM/QEMU 或其他 GPU 架构。
+
+再分发镜像时请保留署名与许可证：[上游 vLLM](https://github.com/vllm-project/vllm)
 （Apache-2.0）、**vLLM 2080 Ti Definitive Edition**、作者
 [`github.com/weicj`](https://github.com/weicj)、
 [QwenLM/FlashQLA](https://github.com/QwenLM/FlashQLA)、其
 [SM70/SM75 适配版本](https://github.com/weicj/FlashQLA-SM70-SM75) 及其他内含第三方
-组件的署名和许可证。
+组件。
 
-## 构建或选择镜像
+## 自行构建
 
-在仓库根目录使用 Docker Buildx：
+通常不需要，CI 会发布镜像。本地构建：
 
 ```bash
 docker buildx build --platform linux/amd64 \
@@ -58,38 +199,32 @@ docker buildx build --platform linux/amd64 \
 export IMAGE=vllm-sm75:local
 ```
 
-这是 CUDA/原生扩展/Rust 源码构建，不是轻量镜像组装。冷构建需要较多内存、磁盘和
-时间；CI 限制编译并行度并设置约 350 分钟超时，但不保证在此时间内完成。Hosted
-runner 失败时应记录实际资源瓶颈。GHA layer cache 不会自动持久化
-`RUN --mount=type=cache` 内部的编译器缓存。
+这会从源码编译 CUDA 内核和 Rust 前端，需要较多内存、磁盘和时间。CI 把编译并行度
+压得较低并设置约 350 分钟上限，这两点都不构成你本机一定能完成的保证。构建阶段还
+需要能对固定的 FlashQLA 仓库执行 `git`。
 
-维护者实际发布镜像之后，命名空间为小写仓库名称，例如：
+## 标签与发布
 
-```bash
-export IMAGE='ghcr.io/<owner>/vllm-2080ti-definitive:main'
-docker pull "$IMAGE"
-```
+镜像发布到 GHCR，命名空间为小写的仓库名
+（`ghcr.io/<owner>/vllm-2080ti-definitive`）：
 
-将 `<owner>` 替换为发布仓库的所有者。这是命名示例，不代表父仓库已经发布镜像。
-GHCR 新包可能默认私有：需要认证访问，或另行明确确认包已公开。核验镜像 OCI
-source/revision 标签；可复现部署优先使用镜像 digest。
-
-| 工作流事件 | 检查成功后发布的标签 |
+| 事件 | 检查通过后发布的标签 |
 | --- | --- |
-| 非默认分支 push 或 PR，命中构建路径 | 不发布；仅构建及 CPU smoke |
-| 默认分支 push | `main` 和源码 SHA 标签；不更新 `latest` |
-| GitHub Release 已发布 | 原始 release 标签，如 `v0.2.2-post3`；仅非 prerelease 同时更新 `latest` |
-| 手动触发 | 默认仅构建；明确要求发布时生成唯一测试标签，不覆盖稳定标签 |
+| PR，或推送到非默认分支 | 无 —— 仅构建与 smoke |
+| 推送到默认分支 | `main` 与 `sha-<commit>`；不移动 `latest` |
+| 已发布的 GitHub Release | Release 标签，如 `v0.2.2-post3`；仅非 prerelease 才更新 `latest` |
+| 手动触发 | 默认仅构建；要求发布时产生唯一的 `test-…` 标签 |
 
-稳定性由 GitHub Release 的 prerelease 标记决定，不用通用 semver 规则重新解释
-`post3`。仅推送 Git tag 不会发布 release 镜像。PR 不获得包写入凭据，也不会自动
-在个人 GPU runner 上运行。这些工作流不会创建 Release 或 Git tag。
+稳定性以 GitHub 的 prerelease 标记为准，因此 `post3` 不会被通用 semver 规则误判为
+prerelease。仅推送 Git tag 不会发布任何镜像。PR 不会获得包写入凭据，也不会被自动
+送到个人 GPU runner 上。
 
-## CPU 与 GPU smoke（不下载模型）
+GHCR 新包可能默认私有：可能需要先认证，或显式设置包可见性。核验镜像的 OCI
+`source` 与 `revision` 标签；可复现部署优先使用 digest 而非标签。
 
-元数据检查工具刻意不初始化 CUDA、不加载 vLLM 原生内核。它检查已安装 wheel
-元数据、精确的 Torch/CUDA 和 vLLM 版本、`import vllm`、E8M0 补丁、FlashQLA
-源码/补丁符号、路径及 JIT 编译工具可用性。依赖一致性另外检查：
+## 验证镜像
+
+以下检查不会启动 CUDA，也不加载原生内核，因此在没有 GPU 的机器上同样可用：
 
 ```bash
 docker run --rm --entrypoint python "$IMAGE" \
@@ -97,10 +232,12 @@ docker run --rm --entrypoint python "$IMAGE" \
 docker run --rm --entrypoint uv "$IMAGE" pip check --python /opt/venv/bin/python
 ```
 
-没有 GPU 的 runner 直接执行 `vllm serve --help` 时，会在构造设备配置默认值时
-失败。独立的 CLI 测试在隔离进程中临时提供缺失的设备元数据，再执行已安装的
-console script；它不选择 CPU 内核、不修改镜像环境，也不捕获 CLI 失败。
-CI 另行检查真实入口：
+第一条检查 wheel 版本、Torch/CUDA 版本、`import vllm`、Torch E8M0 补丁、FlashQLA
+源码与补丁、预期路径以及 JIT 工具；第二条检查依赖集合是否自洽。
+
+这里不能直接使用 `vllm serve --help`：没有 GPU 时它会在检测设备阶段失败。下面的
+独立 CLI 检查会在隔离进程中运行真实安装的 console script，仅补上缺失的设备元数据，
+验证的是 CLI 导入与参数解析，**不是 GPU 启动**：
 
 ```bash
 docker image inspect --format '{{json .Config.Entrypoint}}' "$IMAGE"
@@ -108,12 +245,11 @@ docker run --rm --entrypoint python "$IMAGE" \
   /opt/vllm-tools/smoke_docker_sm75.py --cli-help
 ```
 
-预期入口为 `["vllm","serve"]`。模拟设备元数据的 help 检查仅验证 CLI 导入与参数
-构造，**不代表未经修改的 GPU 启动或原生内核执行通过**。在合适的 GPU 主机上，
-还应执行 `docker run --rm --gpus all "$IMAGE" --help`，并完成下文的实际服务测试。
+预期入口为 `["vllm","serve"]`。在真实 GPU 主机上，还可以用
+`docker run --rm --gpus all "$IMAGE" --help` 检查未经改动的入口。
 
-只有显式传入 `--gpu` 才执行真实内核。GPU 不可用、不是 SM75 或检查失败时直接
-报错，不会把失败转成 skip。工具仅测试 device 0：
+要执行真实内核，需显式传入 `--gpu`。GPU 缺失或不是 SM75 时它会直接报错而不会跳过，
+且只测试 device 0：
 
 ```bash
 docker run --rm --gpus all --ipc=host \
@@ -124,43 +260,34 @@ docker run --rm --gpus all --ipc=host \
 ```
 
 它检查 vLLM 核心 SiLU 操作、FlashInfer CUDA-core decode 与 FP32 参考结果，以及
-FlashQLA JIT `gdn_forward` / `gdn_forward_varlen`，包含原生 FP16 Q/K/V 与 FP32
-staging 的对照、packed 序列与独立 dense 调用的对照。Gate 和 recurrent state
-保持 FP32。这里只使用小张量，不是 benchmark、模型下载、全部 attention 后端
-资格验证或 TP 测试。
+FlashQLA JIT 的 `gdn_forward` / `gdn_forward_varlen`（含原生 FP16 Q/K/V 与 FP32
+的对照、packed 与独立序列的对照）。使用的是极小张量，不是 benchmark、模型下载、
+后端资格验证或 tensor parallel 测试。
 
-首次 JIT 成功后，以相同缓存卷在新容器中再次运行该命令。分别记录首次编译和第二次
-缓存复用；仅再次运行成功不能证明没有发生重新编译。
-`TORCH_EXTENSIONS_DIR=/root/.cache/torch_extensions` 是 FlashQLA 持久化缓存。
-不兼容的镜像/工具链更新应使用不同缓存；不要把旧主机虚拟环境挂载覆盖 `/opt/venv`。
+首次 JIT 成功后，用相同缓存卷在新容器中再执行一次以检查缓存复用，并**分别记录两次
+运行**，因为仅再次运行成功不能说明没有重新编译。
+`TORCH_EXTENSIONS_DIR=/root/.cache/torch_extensions` 是 FlashQLA 的持久化缓存。
+不兼容的镜像或工具链更新应使用不同缓存，也不要把宿主机虚拟环境挂载覆盖 `/opt/venv`。
 
-## 真实模型/API smoke
+## 运行真实模型
 
-入口是 `ENTRYPOINT ["vllm", "serve"]`：直接传入模型位置参数（或 `--model`）与
-原生 vLLM 参数，**不要再添加 `vllm serve` 前缀**。它不调用 `launcher.sh`，也不会
-自动应用 Profile、GPU 编号、TP、上下文、MTP、reasoning 或 chat-template 设置。
-与官方一致的启动方式不代表支持上游所有 GPU/模型/后端组合。
+服务自己的权重是常规做法：只读挂载目录，然后传容器内的路径，见"快速开始"。
+`--served-model-name` 用于设置客户端看到的模型 ID。
 
-以下真实小模型**仅用于 smoke，不是推荐部署 Profile**。显式的 2048-token 上限
-和其他设置只是限制测试规模，不是容量或性能测量。此步骤会下载模型权重，Python
-smoke 工具则不会。必要时在宿主机环境设置 `HF_TOKEN`，不要把 token 烘焙到镜像或
-写入提交的命令。
+如果改为让 vLLM 从 HuggingFace Hub 下载权重，请挂载缓存目录，避免每次重建都重新
+下载；仓库需要授权时传 `HF_TOKEN`——不要把它烘焙进镜像：
 
 ```bash
-docker run --rm --name vllm-sm75-smoke --gpus all --ipc=host \
+docker run --rm --name vllm-sm75-hub --gpus all --ipc=host \
   -p 127.0.0.1:8000:8000 \
-  -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
-  -v vllm-sm75-jit:/root/.cache/torch_extensions \
-  -v vllm-sm75-flashinfer:/root/.cache/flashinfer \
-  -v vllm-sm75-vllm:/root/.cache/vllm \
+  -v /path/to/huggingface:/root/.cache/huggingface \
   -e HF_TOKEN "$IMAGE" Qwen/Qwen3-0.6B \
-  --dtype half --tensor-parallel-size 1 --max-model-len 2048 \
-  --gpu-memory-utilization 0.8 --enforce-eager \
+  --dtype half --max-model-len 2048 \
   --host 0.0.0.0 --port 8000
 ```
 
-启动完成后，在另一个终端检查 health、实际 served model ID 和非空真实生成结果
-（不能只检查 HTTP 状态码）：
+启动后检查 health、实际 served model ID 以及非空的真实生成结果——不能只看 HTTP
+状态码：
 
 ```bash
 curl --fail --silent --show-error http://127.0.0.1:8000/health
@@ -170,27 +297,14 @@ curl --fail --silent --show-error http://127.0.0.1:8000/v1/completions \
   -d '{"model":"Qwen/Qwen3-0.6B","prompt":"The capital of France is","max_tokens":32,"temperature":0}'
 ```
 
-Docker 发布端口绑定 `127.0.0.1`，因此即使服务监听容器全部接口，这个无认证 smoke
-仍只供本机访问。实际远程服务需另外配置认证和网络访问控制。
+示例中的 `Qwen/Qwen3-0.6B` 只是为快速加载而选的小尺寸模型，不是推荐部署 Profile。
 
-已有本地权重时，替换模型参数并添加只读挂载：
+Qwen3.5 系列使用本 fork FlashQLA 后端的 GDN 路线，需要显式传入
+`--gdn-prefill-backend flashqla_legacy`（不是 `--mamba-backend flashqla_legacy`），
+并与 `--dtype half` 及其余路线设置一起使用。Qwen3-0.6B smoke 不会执行 GDN。
 
-```bash
-docker run --rm --gpus all --ipc=host -p 127.0.0.1:8000:8000 \
-  -v /absolute/path/to/Qwen3-0.6B:/models/smoke:ro \
-  -v vllm-sm75-jit:/root/.cache/torch_extensions \
-  -v vllm-sm75-flashinfer:/root/.cache/flashinfer \
-  -v vllm-sm75-vllm:/root/.cache/vllm \
-  "$IMAGE" /models/smoke --served-model-name local-smoke \
-  --dtype half --tensor-parallel-size 1 --max-model-len 2048 \
-  --gpu-memory-utilization 0.8 --enforce-eager --host 0.0.0.0 --port 8000
-```
-
-此例生成请求的模型名使用 `local-smoke`。Qwen3.5 系列使用本 fork FlashQLA 后端的
-GDN 路线，需要显式传入 `--gdn-prefill-backend flashqla_legacy`（不是
-`--mamba-backend flashqla_legacy`），以及 `--dtype half` 和其余路线专用设置。
-Qwen3-0.6B API smoke 不会执行 GDN。实际部署时，查阅
-[硬件 Profile 指南](../../profiles/README.zh-CN.md)，将目标 launcher 有效配置
-（`launcher.sh --print-config`）转换为原生参数/环境变量，不要假设镜像自动应用
-Profile。复用原生主机性能结论前，必须验证确切的模型、精度、MTP、上下文、拓扑及
-benchmark 口径。
+镜像不运行 `launcher.sh`，也不应用 Profile：GPU 编号、tensor parallel 数、上下文、
+MTP、reasoning 及 chat-template 都由你传入。要复现原生部署，请用
+`launcher.sh --print-config` 读出目标 launcher 的有效配置，再转换为参数与环境变量；
+各路线的说明见[硬件 Profile 指南](../../profiles/README.zh-CN.md)。复用任何原生
+主机性能数字前，先确认其对应的模型、精度、MTP 设置、上下文、拓扑与 benchmark 口径。
