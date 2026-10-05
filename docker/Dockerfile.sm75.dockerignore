@@ -23,6 +23,11 @@
 !rust/**
 !tools/
 !tools/**
+!examples/
+!examples/pooling/
+!examples/pooling/score/
+!examples/pooling/score/template/
+!examples/pooling/score/template/*.jinja
 !docker/
 !docker/Dockerfile.sm75
 !docker/Dockerfile.sm75.dockerignore

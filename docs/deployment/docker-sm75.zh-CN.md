@@ -42,14 +42,19 @@ IOMMU/DMA 层——与本镜像、启动参数、模型都无关。官方 vLLM �
 ```bash
 python3 -c "
 import ctypes
-cu = ctypes.CDLL('libcuda.so.1'); cu.cuInit(0)
+cu = ctypes.CDLL('libcuda.so.1')
+rc = cu.cuInit(0)
+assert rc == 0, ('cuInit failed', rc)
 for mb in (64, 128, 256):
-    d = ctypes.c_void_p(); cu.cuMemAllocHost(ctypes.byref(d), mb*1024*1024)
-    print(mb, 'MB:', 'OK' if d else 'FAIL')
+    buf = ctypes.c_void_p()
+    rc = cu.cuMemAllocHost(ctypes.byref(buf), mb * 1024 * 1024)
+    print(mb, 'MB: CUresult', rc, 'OK' if rc == 0 else 'FAIL')
 "
 ```
 
-若较大尺寸失败，可在 `/etc/default/grub` 的 `GRUB_CMDLINE_LINUX_DEFAULT` 中加入
+`CUresult` 为 `0` 表示成功。较大尺寸返回 `304`（`CUDA_ERROR_OPERATING_SYSTEM`）
+才是上面说的 DMA 映射失败；返回其他错误码说明原因不同，不要据此去改 IOMMU。若较大
+尺寸以 `304` 失败，可在 `/etc/default/grub` 的 `GRUB_CMDLINE_LINUX_DEFAULT` 中加入
 `iommu.passthrough=1`，然后 `sudo update-grub && sudo reboot`。重测前先确认参数生效
 ——日志必须显示 `Passthrough`：
 
@@ -129,8 +134,8 @@ curl --fail http://127.0.0.1:8000/v1/models
 `RuntimeError: UVA is not available` 中止，需加上
 `-e VLLM_WSL2_ENABLE_PIN_MEMORY=1`；原生 Linux 不需要。
 
-`docker run` 示例发布到 `127.0.0.1`，而 compose 文件绑定 `0.0.0.0`。除非自行配置，
-服务本身没有认证，因此在向本机之外暴露之前请先加上 `--api-key`。
+compose 文件和 `docker run` 示例都只发布到 `127.0.0.1`。除非自行配置，服务本身没有
+认证，因此在向本机之外暴露之前请先加上 `--api-key`。
 
 ## 双卡
 

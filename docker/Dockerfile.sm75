@@ -85,6 +85,9 @@ LABEL org.opencontainers.image.title="vLLM 2080 Ti Definitive Edition (SM75)" \
 COPY --from=build /opt/venv /opt/venv
 COPY --from=flashqla /opt/FlashQLA /opt/FlashQLA
 COPY LICENSE README.md README.zh-CN.md /usr/share/doc/vllm-sm75/
+# vLLM's own examples pass these reranker templates by relative path; keep that
+# documented path working inside the image.
+COPY examples/pooling/score/template/ /vllm-workspace/examples/pooling/score/template/
 COPY PROJECT_RELEASE.env pyproject.toml /opt/vllm-tools/
 COPY tools/check_torch_inductor_e8m0.py tools/smoke_docker_sm75.py /opt/vllm-tools/
 ENV FLASHQLA_ROOT=/opt/FlashQLA \

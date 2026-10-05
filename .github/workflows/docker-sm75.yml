@@ -22,6 +22,9 @@ on:
       - 'pyproject.toml'
       - 'MANIFEST.in'
       - 'PROJECT_RELEASE.env'
+      - 'README.md'
+      - 'README.zh-CN.md'
+      - 'LICENSE'
       - 'VERSION'
   pull_request:
     paths:
@@ -43,6 +46,9 @@ on:
       - 'pyproject.toml'
       - 'MANIFEST.in'
       - 'PROJECT_RELEASE.env'
+      - 'README.md'
+      - 'README.zh-CN.md'
+      - 'LICENSE'
       - 'VERSION'
   release:
     types: [published]
@@ -58,7 +64,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: docker-sm75-${{ github.event_name }}-${{ github.ref }}
+  # Release runs share one group so two releases cannot promote `latest` out of
+  # order; every other event keeps its own ref.
+  group: docker-sm75-${{ github.event_name }}-${{ github.event_name == 'release' && 'publish' || github.ref }}
   cancel-in-progress: >-
     ${{ github.event_name == 'pull_request' ||
         (github.event_name == 'push' &&

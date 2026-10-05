@@ -50,14 +50,20 @@ Docker and without vLLM:
 ```bash
 python3 -c "
 import ctypes
-cu = ctypes.CDLL('libcuda.so.1'); cu.cuInit(0)
+cu = ctypes.CDLL('libcuda.so.1')
+rc = cu.cuInit(0)
+assert rc == 0, ('cuInit failed', rc)
 for mb in (64, 128, 256):
-    d = ctypes.c_void_p(); cu.cuMemAllocHost(ctypes.byref(d), mb*1024*1024)
-    print(mb, 'MB:', 'OK' if d else 'FAIL')
+    buf = ctypes.c_void_p()
+    rc = cu.cuMemAllocHost(ctypes.byref(buf), mb * 1024 * 1024)
+    print(mb, 'MB: CUresult', rc, 'OK' if rc == 0 else 'FAIL')
 "
 ```
 
-If the larger sizes fail, put devices into passthrough mode by adding
+`CUresult` `0` is success. Code `304` (`CUDA_ERROR_OPERATING_SYSTEM`) on the
+larger sizes is the DMA-mapping failure described above; a different code points
+somewhere else, so read it before touching IOMMU settings. If the larger sizes
+fail with `304`, put devices into passthrough mode by adding
 `iommu.passthrough=1` to `GRUB_CMDLINE_LINUX_DEFAULT` in `/etc/default/grub`,
 then `sudo update-grub && sudo reboot`. Confirm it took effect — the log must
 report `Passthrough` — before re-testing:
@@ -143,9 +149,9 @@ On a **WSL2 host**, vLLM disables pinned memory by default and startup aborts
 with `RuntimeError: UVA is not available`. Add `-e VLLM_WSL2_ENABLE_PIN_MEMORY=1`
 there; native Linux does not need it.
 
-The `docker run` examples publish to `127.0.0.1`, while the compose file binds
-`0.0.0.0`. The server has no authentication unless you configure it, so add
-`--api-key` before exposing it beyond the local machine.
+Both the compose file and the `docker run` examples publish to `127.0.0.1`. The
+server has no authentication unless you configure it, so add `--api-key` before
+exposing it beyond the local machine.
 
 ## Two GPUs
 

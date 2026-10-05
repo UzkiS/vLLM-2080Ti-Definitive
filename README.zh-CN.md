@@ -146,10 +146,10 @@ docker compose up -d
 `GPU_MEMORY_UTILIZATION`、`MAX_NUM_SEQS`。需要其他 vLLM 参数时，自己加到 compose
 文件的 `command:` 里即可——镜像入口已经是 `vllm serve`。
 
-观察启动过程并确认服务正常：
+查看日志并确认服务正常（想持续跟踪日志就给 logs 加上 `-f`）：
 
 ```bash
-docker compose logs -f
+docker compose logs --tail=100
 curl --fail http://127.0.0.1:8000/health
 curl --fail http://127.0.0.1:8000/v1/models
 ```

@@ -178,17 +178,57 @@ jobs:
         env:
           SUBJECT: ${{ steps.loaded.outputs.subject }}
           IMAGE_TAGS: ${{ steps.metadata.outputs.tags }}
+          RELEASE_TAG: ${{ steps.metadata.outputs.version }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           trap 'status=$?; printf "Publish elapsed: %s seconds (exit %s)\n\n" "$SECONDS" "$status" >> "$GITHUB_STEP_SUMMARY"' EXIT
           read -r -a tags <<< "$IMAGE_TAGS"
           (( ${#tags[@]} > 0 ))
+          # `latest` is shared by every stable release. Only the newest published
+          # one may move it, so a slow build of an older release cannot roll it
+          # back. Immutable version tags are always published.
+          allow_latest=false
           for tag in "${tags[@]}"; do
+            [[ "$tag" == *":latest" ]] || continue
+            if python3 tools/docker_sm75_latest_guard.py \
+                 --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG"; then
+              allow_latest=true
+            else
+              printf 'Leaving `latest` unchanged: this run is not the newest published release.\n\n' >> "$GITHUB_STEP_SUMMARY"
+            fi
+            break
+          done
+          for tag in "${tags[@]}"; do
+            if [[ "$tag" == *":latest" && "$allow_latest" != "true" ]]; then
+              continue
+            fi
             # Retag the already-pulled digest; no rebuild and no re-upload.
             docker tag "$SUBJECT" "$tag"
             docker push "$tag"
             printf 'Published `%s`\n\n' "$tag" >> "$GITHUB_STEP_SUMMARY"
           done
+
+      - name: Remove the staging tag
+        # The staged manifest is already published under its release tags, so the
+        # extra tag is only clutter; clean it up whether or not the smoke passed.
+        # Best effort: a failure here must not fail an otherwise good publish.
+        if: ${{ always() && inputs.publish && steps.build.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          PUSHED_IMAGE: ${{ steps.metadata.outputs.image }}
+          STAGING_TAG: ${{ steps.metadata.outputs.image }}:staging-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          repo_path="${PUSHED_IMAGE#ghcr.io/}"
+          tag="${STAGING_TAG##*:}"
+          token=$(curl -fsS -u "${GITHUB_ACTOR}:${GITHUB_TOKEN}" \
+            "https://ghcr.io/token?service=ghcr.io&scope=repository:${repo_path}:delete" \
+            | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])')
+          curl -fsS -X DELETE -H "Authorization: Bearer ${token}" \
+            "https://ghcr.io/v2/${repo_path}/manifests/${tag}"
+          printf 'Removed staging tag `%s`\n\n' "$tag" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Record total duration and final disk availability
         if: ${{ always() }}

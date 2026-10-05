@@ -158,10 +158,11 @@ Optional: `IMAGE`, `MODEL_ALIAS`, `TP_SIZE`, `MAX_MODEL_LEN`,
 `GPU_MEMORY_UTILIZATION`, `MAX_NUM_SEQS`. Add any other vLLM flag to
 `command:` in the compose file — the image entrypoint is already `vllm serve`.
 
-Watch it come up and confirm it is serving:
+Check the logs and confirm it is serving (add `-f` to the logs command to follow
+them live):
 
 ```bash
-docker compose logs -f
+docker compose logs --tail=100
 curl --fail http://127.0.0.1:8000/health
 curl --fail http://127.0.0.1:8000/v1/models
 ```

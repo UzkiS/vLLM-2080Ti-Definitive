@@ -9,6 +9,7 @@ import importlib
 import importlib.metadata
 import importlib.util
 import os
+import re
 import runpy
 import shlex
 import shutil
@@ -17,7 +18,11 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-import tomllib
+# The repository supports Python 3.10, so avoid `tomllib` (3.11+). Only one
+# scalar is needed out of pyproject.toml.
+_FALLBACK_VERSION = re.compile(
+    r'^\s*fallback_version\s*=\s*"([^"]+)"\s*$', re.MULTILINE
+)
 
 
 def require(condition: bool, message: str) -> None:
@@ -32,9 +37,11 @@ def release_policy(bundle: Path) -> tuple[dict[str, str], str]:
         if parts:
             key, value = parts[0].split("=", 1)
             release[key] = value
-    with (bundle / "pyproject.toml").open("rb") as stream:
-        version = tomllib.load(stream)["tool"]["setuptools_scm"]["fallback_version"]
-    return release, version
+    match = _FALLBACK_VERSION.search(
+        (bundle / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    require(match is not None, "pyproject.toml has no setuptools_scm fallback_version")
+    return release, match.group(1)
 
 
 def check_versions(release: dict[str, str], expected: str, torch, vllm) -> None:
