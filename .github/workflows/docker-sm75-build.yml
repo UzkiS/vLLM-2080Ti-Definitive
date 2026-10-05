@@ -195,7 +195,7 @@ jobs:
                  --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG"; then
               allow_latest=true
             else
-              printf 'Leaving `latest` unchanged: this run is not the newest published release.\n\n' >> "$GITHUB_STEP_SUMMARY"
+              printf 'Leaving `latest` unchanged: could not confirm this run is the newest published release.\n\n' >> "$GITHUB_STEP_SUMMARY"
             fi
             break
           done
